@@ -5,7 +5,6 @@ import os
 import peft.utils.save_and_load
 from transformers import BitsAndBytesConfig
 
-# Import các thành phần nội bộ
 from src.core.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration
 from src.services.audio_processor import QwenOmniAudioProcessor
 from src.repositories.insurance_manager import InsuranceManager
@@ -15,20 +14,17 @@ MODEL_PATH = "./models"
 AUDIO_BASE = "./data"
 
 class QwenOmniAgent:
-    def __init__(self, model_path): # Bỏ adapter_path
+    def __init__(self, model_path):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # 1. Khởi tạo Database & Processor
         self.db_manager = InsuranceManager()
         self.omni_processor = QwenOmniAudioProcessor(model_path, AUDIO_BASE)
         
-        # 2. Nạp Base Model duy nhất
         self.model = self._load_model(model_path)
 
     def _load_model(self, model_path):
-        print(f"🚀 Loading Base Model Qwen2.5-Omni on {self.device.upper()}...")
+        print(f"Loading Base Model Qwen2.5-Omni...")
         
-        # Thiết lập cấu hình nạp (Chỉ dùng 4-bit nếu chạy trên GPU NVIDIA)
         bnb_config = None
         if self.device == "cuda":
             bnb_config = BitsAndBytesConfig(
@@ -38,7 +34,6 @@ class QwenOmniAgent:
                 bnb_4bit_use_double_quant=True
             )
 
-        # Nạp model trực tiếp từ MODEL_PATH
         model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
             model_path,
             quantization_config=bnb_config,
@@ -46,30 +41,25 @@ class QwenOmniAgent:
             trust_remote_code=True
         ).to(self.device)
         
-        print("✅ Base Model đã sẵn sàng!")
+        print("Base model is ready!")
         return model
 
     def _patch_peft(self):
-        """Vá lỗi PEFT trên môi trường có phiên bản không đồng bộ."""
         if not hasattr(peft.utils.save_and_load, "_maybe_shard_state_dict_for_tp"):
             peft.utils.save_and_load._maybe_shard_state_dict_for_tp = lambda state_dict, *args, **kwargs: state_dict
-            print("✅ PEFT Monkey Patch applied.")
+            print("PEFT Monkey Patch applied.")
 
     def _universal_parser(self, response_text):
-        """Bộ Parser linh hoạt xử lý JSON và nháy đơn."""
         tool_call = None
-        # Ưu tiên tìm trong thẻ <tool_call>
         match = re.search(r'<tool_call>(.*?)</tool_call>', response_text, re.DOTALL)
         raw_content = match.group(1).strip() if match else response_text
 
-        # Tìm khối JSON {...}
         potential_jsons = re.findall(r'\{.*\}', raw_content, re.DOTALL)
         if potential_jsons:
             try:
                 clean_json = potential_jsons[-1].replace("'", '"')
                 data = json.loads(clean_json)
                 
-                # Auto-mapping nếu thiếu tên hàm
                 if "name" not in data:
                     if "policy_id" in data: data = {"name": "verify_policy", "arguments": data}
                     elif "hospital_name" in data: data = {"name": "process_medical_claim", "arguments": data}
@@ -79,13 +69,11 @@ class QwenOmniAgent:
         return tool_call
 
     def run_workflow(self, audio_files):
-        """Luồng xử lý Agent hoàn chỉnh."""
-        # BƯỚC 1: Tiền xử lý Audio
         inputs = self.omni_processor.process_conversation(audio_files)
         inputs = {k: v.to(self.device).to(torch.bfloat16) if v.dtype == torch.float32 else v.to(self.device) 
                   for k, v in inputs.items()}
 
-        # BƯỚC 2: Suy luận lượt 1 (Gọi Tool)
+        # Suy luận lượt 1 (Gọi Tool)
         print("\n[Thinking] Analyzing audio for intent...")
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -99,26 +87,24 @@ class QwenOmniAgent:
         input_len = inputs['input_ids'].shape[1]
         full_response = self.omni_processor.processor.batch_decode(output_ids[:, input_len:], skip_special_tokens=True)[0].strip()
         
-        # BƯỚC 3: Trích xuất và Thực thi Tool thực tế qua Database
+        # Trích xuất và Thực thi Tool
         tool_to_run = self._universal_parser(full_response)
         observation = None
 
         if tool_to_run:
             func_name = tool_to_run.get("name")
             args = tool_to_run.get("arguments", {})
-            print(f"🎯 CALLING TOOL: {func_name} with {args}")
+            print(f"CALLING TOOL: {func_name} with {args}")
             
-            # Gọi phương thức từ InsuranceManager
             if hasattr(self.db_manager, func_name):
                 method = getattr(self.db_manager, func_name)
                 result = method(**args)
                 observation = json.dumps(result, ensure_ascii=False)
-                print(f"📥 DB RESULT: {observation}")
+                print(f"DB RESULT: {observation}")
 
-        # BƯỚC 4: Suy luận lượt 2 (Phản hồi tự nhiên)
+        # Suy luận lượt 2 (Phản hồi tự nhiên)
         if observation:
             print("\n[Talking] Generating final response...")
-            # Tạo prompt lượt 2 (Văn bản thuần túy)
             messages = [
                 {"role": "assistant", "content": full_response},
                 {"role": "user", "content": f"Kết quả từ hệ thống: {observation}"}
@@ -134,7 +120,7 @@ class QwenOmniAgent:
             final_text = self.omni_processor.processor.batch_decode(final_ids[:, final_inputs['input_ids'].shape[1]:], skip_special_tokens=True)[0].strip()
             
             print("\n" + "═"*50)
-            print(f"💬 AGENT RESPONSE:\n{final_text}")
+            print(f"AGENT RESPONSE:\n{final_text}")
             print("═"*50)
         else:
             print(f"Agent did not call a tool. Response: {full_response}")
@@ -142,37 +128,31 @@ class QwenOmniAgent:
     def cleanup(self):
         self.db_manager.close()
 
-# --- MAIN EXECUTION ---
 if __name__ == "__main__":
     agent = QwenOmniAgent(MODEL_PATH)
     
     try:
-        # 1. Kiểm tra sự tồn tại của thư mục chứa audio
         if os.path.exists(AUDIO_BASE):
-            # 2. Lọc tất cả các file có định dạng audio (wav, mp3, m4a, flac)
             valid_extensions = ('.wav', '.mp3', '.m4a', '.flac')
             audio_files = [
                 f for f in os.listdir(AUDIO_BASE) 
                 if f.lower().endswith(valid_extensions)
             ]
             
-            # 3. Sắp xếp file theo tên (đảm bảo thứ tự hội thoại nếu cần)
             audio_files.sort()
 
             if audio_files:
-                print(f"📂 Đã tìm thấy {len(audio_files)} file audio trong {AUDIO_BASE}:")
+                print(f"Audio file {len(audio_files)} has been found in {AUDIO_BASE}:")
                 for i, f in enumerate(audio_files):
                     print(f"   [{i+1}] {f}")
                 
-                # 4. Đưa danh sách file tự động vào workflow
                 agent.run_workflow(audio_files)
             else:
-                print(f"⚠️ Cảnh báo: Thư mục '{AUDIO_BASE}' đang trống, không có file audio nào để xử lý.")
+                print(f"Warning: The '{AUDIO_BASE}' folder is empty; there are no audio files to process.")
         else:
-            print(f"❌ Lỗi: Không tìm thấy thư mục '{AUDIO_BASE}'. Hãy tạo thư mục này và chèn file audio vào.")
+            print(f"Error: Folder '{AUDIO_BASE}' not found. Please create this folder and insert the audio file into it.")
             
     except Exception as e:
-        print(f"🚨 Đã xảy ra lỗi trong quá trình thực thi: {e}")
+        print(f"An error occurred during execution: {e}")
     finally:
-        # Luôn đảm bảo đóng kết nối Database an toàn
         agent.cleanup()
