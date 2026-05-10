@@ -12,6 +12,7 @@ from src.repositories.insurance_manager import InsuranceManager
 # --- CONFIGURATION ---
 MODEL_PATH = "./models" 
 AUDIO_BASE = "./data"
+OUTPUT_BASE = "./output"
 
 class QwenOmniAgent:
     def __init__(self, model_path):
@@ -38,7 +39,8 @@ class QwenOmniAgent:
             model_path,
             quantization_config=bnb_config,
             device_map="auto" if self.device == "cuda" else None,
-            trust_remote_code=True
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
         ).to(self.device)
         
         print("Base model is ready!")
@@ -104,7 +106,7 @@ class QwenOmniAgent:
 
         # Suy luận lượt 2 (Phản hồi tự nhiên)
         if observation:
-            print("\n[Talking] Generating final response...")
+            print("\n[Talking] Starting generation...")
             messages = [
                 {"role": "assistant", "content": full_response},
                 {"role": "user", "content": f"Kết quả từ hệ thống: {observation}"}
@@ -112,18 +114,90 @@ class QwenOmniAgent:
             
             final_prompt = self.omni_processor.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             final_inputs = self.omni_processor.processor(text=final_prompt, return_tensors="pt").to(self.device)
-            final_inputs = {k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v for k, v in final_inputs.items()}
+            final_inputs = {k: v.to(torch.float32) if v.dtype == torch.float32 else v for k, v in final_inputs.items()}
 
             with torch.no_grad():
-                final_ids = self.model.generate(**final_inputs, generation_mode="text", max_new_tokens=256)
+                print("AI is 'thinking' of the words...")
+                output_text_ids = self.model.generate(**final_inputs, generation_mode="text", max_new_tokens=128)
+                input_len = final_inputs['input_ids'].shape[1]
+                final_text = self.omni_processor.processor.batch_decode(output_text_ids[:, input_len:], skip_special_tokens=True)[0].strip()
+                
+                print("\n" + "═"*50)
+                print(f"AGENT TEXT: {final_text}")
+                print("═"*50)
+
+                outputs = self.model.generate(
+                    **final_inputs, 
+                    generation_mode="audio", 
+                    max_new_tokens=15,
+                    token2wav_num_steps=5, 
+                    do_sample=False        
+                )
             
-            final_text = self.omni_processor.processor.batch_decode(final_ids[:, final_inputs['input_ids'].shape[1]:], skip_special_tokens=True)[0].strip()
+            print("\n--- TUPLE INSPECTION START ---")
+            print(f"Output type: {type(outputs)}")
             
-            print("\n" + "═"*50)
-            print(f"AGENT RESPONSE:\n{final_text}")
-            print("═"*50)
-        else:
-            print(f"Agent did not call a tool. Response: {full_response}")
+            if isinstance(outputs, tuple):
+                print(f"Tuple length: {len(outputs)}")
+                for i, element in enumerate(outputs):
+                    print(f"  - Element [{i}]:")
+                    print(f"    Type: {type(element)}")
+                    if torch.is_tensor(element):
+                        print(f"    Shape: {element.shape}")
+                        print(f"    Dtype: {element.dtype}")
+                        print(f"    Device: {element.device}")
+                    elif isinstance(element, (list, tuple)):
+                        print(f"    Length: {len(element)}")
+                        if len(element) > 0:
+                            print(f"    Type of first item: {type(element[0])}")
+                    else:
+                        print(f"    Value: {element}")
+            else:
+                print("Output is NOT a tuple. It might be a ModelOutput object.")
+                for attr in ['sequences', 'audio_wav', 'sampling_rate']:
+                    if hasattr(outputs, attr):
+                        val = getattr(outputs, attr)
+                        print(f"  - Attribute '{attr}': type={type(val)}")
+            print("--- TUPLE INSPECTION END ---\n")
+
+            audio_wav = None
+            sampling_rate = 24000 
+
+            if isinstance(outputs, tuple):
+                final_output_ids = outputs[0]
+                if len(outputs) > 1:
+                    audio_wav = outputs[1]
+                if len(outputs) > 2:
+                    sampling_rate = outputs[2]
+            else:
+                final_output_ids = getattr(outputs, "sequences", outputs)
+                audio_wav = getattr(outputs, "audio_wav", None)
+                sampling_rate = getattr(outputs, "sampling_rate", 24000)
+
+            input_len = final_inputs['input_ids'].shape[1]
+            text_ids = final_output_ids[:, input_len:]
+            final_text = self.omni_processor.processor.batch_decode(text_ids, skip_special_tokens=True)[0].strip()
+
+            if audio_wav is not None:
+                try:
+                    if torch.is_tensor(audio_wav) and audio_wav.numel() > 0:
+                        audio_data_np = audio_wav[0].cpu().float().numpy() if audio_wav.ndim > 1 else audio_wav.cpu().float().numpy()
+                    elif isinstance(audio_wav, (list, tuple)) and len(audio_wav) > 0:
+                        print(f"audio_wav is a list with {len(audio_wav)} items")
+                        item = audio_wav[0]
+                        if torch.is_tensor(item) and item.numel() > 0:
+                            audio_data_np = item.cpu().float().numpy().flatten()
+                        else:
+                            print("Item inside list is empty or NOT a valid tensor.")
+                            audio_wav = None
+                    
+                    if audio_wav is not None:
+                        output_path = os.path.join(OUTPUT_BASE, "agent_reply.wav")
+                        import scipy.io.wavfile as wavfile
+                        wavfile.write(output_path, sampling_rate, audio_data_np)
+                        print(f"Audio feedback has been saved at: {output_path}")
+                except Exception as e:
+                    print(f"Audio Extraction Error: {e}")
 
     def cleanup(self):
         self.db_manager.close()

@@ -3,6 +3,7 @@ import os
 from transformers import AutoProcessor
 from src.utils.qwen_omni_utils.v2_5 import process_mm_info
 from src.schemas.tools_schema import InsuranceToolSchema
+import scipy.io.wavfile as wavfile
 
 class QwenOmniAudioProcessor:
     def __init__(self, model_path: str, audio_base_path: str):
@@ -24,6 +25,13 @@ class QwenOmniAudioProcessor:
             "4. EXTRACTION: Extract required parameters directly from the audio.\n"
             "5. CONSTRAINT: Do not explain. Do not engage in small talk."
         )
+    
+    def save_audio_output(self, audio_data, sampling_rate, filename="response.wav"):
+        """Lưu mảng numpy thành file wav."""
+        output_path = os.path.join(self.audio_base_path, filename)
+        wavfile.write(output_path, sampling_rate, audio_data)
+        print(f"Agent response saved to: {output_path}")
+        return output_path
 
     def process_conversation(self, audio_filenames: list, save_pt: str = "preprocessed_inputs.pt"):
         """
