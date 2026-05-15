@@ -11,3 +11,5 @@ wheels/
 /models
 
 .env
+*.db
+certificate.pem

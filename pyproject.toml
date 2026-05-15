@@ -23,10 +23,12 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "mysql-connector-python>=9.7.0",
     "sqlalchemy>=2.0.49",
+    "agno>=2.6.5",
+    "gradio>=6.14.0",
+    "scipy>=1.15.3",
 ]
 
 [tool.uv]
-# QUAN TRỌNG: Dòng này giúp uv không cố gắng build project thành package
 package = false
 
 [dependency-groups]

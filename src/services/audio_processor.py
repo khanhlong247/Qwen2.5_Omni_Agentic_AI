@@ -60,8 +60,8 @@ class QwenOmniAudioProcessor:
             return_tensors="pt"
         )
 
-        if save_pt:
-            torch.save(inputs, save_pt)
-            print(f"Tensors saved successfully to {save_pt}")
+        # if save_pt:
+        #     torch.save(inputs, save_pt)
+        #     print(f"Tensors saved successfully to {save_pt}")
 
         return inputs
